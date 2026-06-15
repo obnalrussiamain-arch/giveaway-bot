@@ -1,14 +1,14 @@
 name: Run Giveaway Bot
 
 on:
-  workflow_dispatch:        # запуск вручную с кнопки в GitHub
+  workflow_dispatch:
   schedule:
-    - cron: "0 */5 * * *"  # перезапуск каждые 5 часов (Actions лимит ~6ч)
+    - cron: "0 */5 * * *"
 
 jobs:
   bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350    # ~5 ч 50 мин — чуть меньше лимита Actions
+    timeout-minutes: 350
 
     steps:
       - name: Checkout repo
@@ -19,22 +19,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-
       - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      # Восстановить базу участников из артефакта (если есть)
-      - name: Restore participants data
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          name: participants-db
-          path: .
-        continue-on-error: true   # первый запуск — файла ещё нет
+        run: pip install python-telegram-bot==21.5
 
       - name: Run bot
         env:
@@ -44,12 +30,3 @@ jobs:
           GIVEAWAY_TITLE: ${{ secrets.GIVEAWAY_TITLE }}
           PRIZE_TEXT:     ${{ secrets.PRIZE_TEXT }}
         run: python bot.py
-
-      # Сохранить базу участников между запусками
-      - name: Save participants data
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: participants-db
-          path: participants.json
-          retention-days: 90
