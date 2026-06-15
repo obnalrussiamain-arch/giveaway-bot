@@ -12,19 +12,18 @@ from telegram.ext import (
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN      = os.environ.get("BOT_TOKEN", "")
-CHANNEL_ID     = os.environ.get("CHANNEL_ID", "")
-ADMIN_ID       = int(os.environ.get("ADMIN_ID", "0"))
-DATA_FILE      = "participants.json"
+BOT_TOKEN  = os.environ.get("BOT_TOKEN", "")
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "")
+ADMIN_ID   = int(os.environ.get("ADMIN_ID", "0"))
+DATA_FILE  = "participants.json"
 
-# Состояния для /create
 ASK_TITLE, ASK_PRIZE, ASK_DESCRIPTION = range(3)
 
 def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {"participants": {}, "winner": None, "active": False, "giveaway": None}
+    return {"participants": {}, "winner": None, "active": False, "giveaway": None, "channel_message_id": None}
 
 def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -38,102 +37,91 @@ async def is_subscribed(context, user_id):
         logger.warning(f"Sub check failed: {e}")
         return False
 
+def build_channel_text(g, total, winner=None):
+    """Текст поста в канале"""
+    text = (
+        f"🎉 *{g['title']}*\n\n"
+        f"🎁 Приз: *{g['prize']}*\n\n"
+        f"{g['description']}\n\n"
+        f"👥 Участников: *{total}*"
+    )
+    if winner:
+        text += f"\n\n🏆 Победитель: {winner['name']}"
+    return text
+
+async def update_channel_post(context, data):
+    """Обновить пост в канале — счётчик участников"""
+    msg_id = data.get("channel_message_id")
+    g = data.get("giveaway")
+    if not msg_id or not g:
+        return
+    total = len(data["participants"])
+    winner = data.get("winner")
+
+    bot_info = await context.bot.get_me()
+    kb = [[InlineKeyboardButton(
+        "🏆 Победитель выбран!" if winner else f"🎯 Участвовать ({total})",
+        url=f"https://t.me/{bot_info.username}?start=join"
+    )]]
+
+    try:
+        await context.bot.edit_message_text(
+            chat_id=CHANNEL_ID,
+            message_id=msg_id,
+            text=build_channel_text(g, total, winner),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+    except Exception as e:
+        logger.warning(f"Could not update channel post: {e}")
+
 # ─── /start ───────────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
+    user = update.effective_user
+    uid = str(user.id)
+
     if not data["active"] or not data.get("giveaway"):
         await update.message.reply_text("Сейчас нет активных розыгрышей.")
         return
+
     g = data["giveaway"]
-    kb = [[InlineKeyboardButton("🎯 Участвовать", callback_data="join")]]
-    note = ""
-    if data["winner"]:
-        note = f"\n\n🏆 Победитель: {data['winner']['name']}"
-    await update.message.reply_text(
-        f"🎉 {g['title']}\n\n"
-        f"🎁 Приз: {g['prize']}\n\n"
-        f"{g['description']}\n\n"
-        f"Подпишитесь на канал и нажмите кнопку ниже!{note}",
-        reply_markup=InlineKeyboardMarkup(kb) if not data["winner"] else None
-    )
+    already = uid in data["participants"]
+    winner = data.get("winner")
 
-# ─── /create ──────────────────────────────────────────────────────────────────
-async def create_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Нет доступа.")
-        return ConversationHandler.END
-    await update.message.reply_text(
-        "📝 Создание нового розыгрыша\n\nШаг 1/3 — Введите название розыгрыша:"
-    )
-    return ASK_TITLE
+    if winner:
+        is_winner = str(winner["id"]) == uid
+        text = (
+            f"🎉 *{g['title']}*\n\n"
+            f"🎁 Приз: *{g['prize']}*\n\n"
+            f"🏆 Победитель: *{winner['name']}*\n\n"
+            + ("🥳 *Это вы! Ожидайте связи от администратора.*" if is_winner else "Розыгрыш завершён.")
+        )
+        await update.message.reply_text(text, parse_mode="Markdown")
+        return
 
-async def create_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["title"] = update.message.text
-    await update.message.reply_text(
-        f"✅ Название: {update.message.text}\n\nШаг 2/3 — Введите приз:"
-    )
-    return ASK_PRIZE
-
-async def create_prize(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["prize"] = update.message.text
-    await update.message.reply_text(
-        f"✅ Приз: {update.message.text}\n\nШаг 3/3 — Введите описание розыгрыша (или напишите '-' чтобы пропустить):"
-    )
-    return ASK_DESCRIPTION
-
-async def create_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    desc = update.message.text
-    if desc == "-":
-        desc = "Участвуйте в нашем розыгрыше!"
-
-    title = context.user_data["title"]
-    prize = context.user_data["prize"]
-
-    # Сохраняем и сбрасываем участников
-    data = load_data()
-    data["giveaway"] = {
-        "title": title,
-        "prize": prize,
-        "description": desc,
-        "created_at": datetime.utcnow().isoformat()
-    }
-    data["participants"] = {}
-    data["winner"] = None
-    data["active"] = True
-    save_data(data)
-
-    # Публикуем пост в канал
-    bot_info = await context.bot.get_me()
-    bot_username = bot_info.username
-    kb = [[InlineKeyboardButton(
-        "🎯 Участвовать в розыгрыше",
-        url=f"https://t.me/{bot_username}?start=join"
-    )]]
-    channel_text = (
-        f"🎉 *{title}*\n\n"
-        f"🎁 Приз: *{prize}*\n\n"
-        f"{desc}\n\n"
-        f"👇 Нажмите кнопку ниже чтобы участвовать!\n"
-        f"_(необходима подписка на канал)_"
-    )
-    await context.bot.send_message(
-        CHANNEL_ID,
-        channel_text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
-
-    await update.message.reply_text(
-        f"✅ Розыгрыш создан и опубликован в канале!\n\n"
-        f"🎉 {title}\n"
-        f"🎁 {prize}\n\n"
-        f"Используйте /admin для управления."
-    )
-    return ConversationHandler.END
-
-async def create_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Создание розыгрыша отменено.")
-    return ConversationHandler.END
+    if already:
+        kb = [[InlineKeyboardButton("✅ Вы уже участвуете", callback_data="already")]]
+        await update.message.reply_text(
+            f"🎉 *{g['title']}*\n\n"
+            f"🎁 Приз: *{g['prize']}*\n\n"
+            f"{g['description']}\n\n"
+            f"👥 Участников: *{len(data['participants'])}*\n\n"
+            f"Вы уже зарегистрированы! Ждите результатов.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+    else:
+        kb = [[InlineKeyboardButton("🎯 Участвовать", callback_data="join")]]
+        await update.message.reply_text(
+            f"🎉 *{g['title']}*\n\n"
+            f"🎁 Приз: *{g['prize']}*\n\n"
+            f"{g['description']}\n\n"
+            f"👥 Участников: *{len(data['participants'])}*\n\n"
+            f"Подпишитесь на канал и нажмите кнопку!",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
 
 # ─── Участие ──────────────────────────────────────────────────────────────────
 async def join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -146,17 +134,20 @@ async def join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not data["active"]:
         await query.edit_message_text("Розыгрыш завершён.")
         return
-    if data["winner"]:
+    if data.get("winner"):
         await query.answer("Победитель уже выбран!", show_alert=True)
         return
     if uid in data["participants"]:
         await query.answer("Вы уже участвуете!", show_alert=True)
+        # Меняем кнопку на "Уже участвуете"
+        kb = [[InlineKeyboardButton("✅ Вы уже участвуете", callback_data="already")]]
+        try:
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb))
+        except:
+            pass
         return
     if not await is_subscribed(context, user.id):
-        kb = [[InlineKeyboardButton(
-            "📢 Подписаться на канал",
-            url=f"https://t.me/{CHANNEL_ID.lstrip('@')}"
-        )]]
+        kb = [[InlineKeyboardButton("📢 Подписаться на канал", url=f"https://t.me/{CHANNEL_ID.lstrip('@')}")]]
         await query.message.reply_text(
             f"❌ Сначала подпишитесь на {CHANNEL_ID}, затем нажмите Участвовать снова.",
             reply_markup=InlineKeyboardMarkup(kb)
@@ -170,11 +161,90 @@ async def join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "joined_at": datetime.utcnow().isoformat()
     }
     save_data(data)
-    await query.answer("🎉 Вы зарегистрированы!", show_alert=True)
+
+    total = len(data["participants"])
+
+    # Меняем кнопку на "Вы уже участвуете"
+    g = data["giveaway"]
+    kb = [[InlineKeyboardButton("✅ Вы уже участвуете", callback_data="already")]]
+    try:
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb))
+    except:
+        pass
+
     await query.message.reply_text(
-        f"✅ {user.full_name}, вы участвуете в розыгрыше!\n"
-        f"👥 Всего участников: {len(data['participants'])}"
+        f"🎉 *{user.full_name}*, вы участвуете в розыгрыше!\n"
+        f"👥 Всего участников: *{total}*",
+        parse_mode="Markdown"
     )
+
+    # Обновляем счётчик в посте канала
+    await update_channel_post(context, data)
+
+async def already_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("Вы уже участвуете в розыгрыше! Ждите результатов 🤞", show_alert=True)
+
+# ─── /create ──────────────────────────────────────────────────────────────────
+async def create_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Нет доступа.")
+        return ConversationHandler.END
+    await update.message.reply_text("📝 *Создание розыгрыша*\n\nШаг 1/3 — Введите название:", parse_mode="Markdown")
+    return ASK_TITLE
+
+async def create_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["title"] = update.message.text
+    await update.message.reply_text(f"✅ Название: *{update.message.text}*\n\nШаг 2/3 — Введите приз:", parse_mode="Markdown")
+    return ASK_PRIZE
+
+async def create_prize(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["prize"] = update.message.text
+    await update.message.reply_text(f"✅ Приз: *{update.message.text}*\n\nШаг 3/3 — Введите описание (или '-' чтобы пропустить):", parse_mode="Markdown")
+    return ASK_DESCRIPTION
+
+async def create_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    desc = update.message.text
+    if desc.strip() == "-":
+        desc = "Участвуйте в нашем розыгрыше прямо сейчас!"
+
+    title = context.user_data["title"]
+    prize = context.user_data["prize"]
+
+    data = load_data()
+    data["giveaway"] = {
+        "title": title, "prize": prize, "description": desc,
+        "created_at": datetime.utcnow().isoformat()
+    }
+    data["participants"] = {}
+    data["winner"] = None
+    data["active"] = True
+    save_data(data)
+
+    bot_info = await context.bot.get_me()
+    kb = [[InlineKeyboardButton("🎯 Участвовать (0)", url=f"https://t.me/{bot_info.username}?start=join")]]
+
+    msg = await context.bot.send_message(
+        CHANNEL_ID,
+        build_channel_text(data["giveaway"], 0),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
+
+    data["channel_message_id"] = msg.message_id
+    save_data(data)
+
+    await update.message.reply_text(
+        f"✅ Розыгрыш создан и опубликован в канале!\n\n"
+        f"🎉 *{title}*\n🎁 {prize}\n\n"
+        f"Кнопка будет обновляться при каждой новой регистрации.\nИспользуйте /admin для управления.",
+        parse_mode="Markdown"
+    )
+    return ConversationHandler.END
+
+async def create_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Создание отменено.")
+    return ConversationHandler.END
 
 # ─── /admin ───────────────────────────────────────────────────────────────────
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -188,20 +258,16 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = len(data["participants"])
     status = "активен" if data["active"] else "завершён"
     winner_line = f"\n🏆 Победитель: {data['winner']['name']}" if data["winner"] else ""
-
     kb = [
-        [InlineKeyboardButton("👥 Список участников", callback_data="admin_list_0")],
-        [InlineKeyboardButton("🎲 Выбрать победителя", callback_data="admin_pick")],
-        [InlineKeyboardButton("📢 Объявить победителя в канале", callback_data="admin_announce")],
-        [InlineKeyboardButton("🔒 Завершить розыгрыш", callback_data="admin_close")],
-        [InlineKeyboardButton("🔓 Открыть розыгрыш", callback_data="admin_open")],
+        [InlineKeyboardButton("👥 Список участников",         callback_data="admin_list_0")],
+        [InlineKeyboardButton("🎲 Выбрать победителя",        callback_data="admin_pick")],
+        [InlineKeyboardButton("📢 Объявить победителя",       callback_data="admin_announce")],
+        [InlineKeyboardButton("🔒 Завершить розыгрыш",        callback_data="admin_close")],
+        [InlineKeyboardButton("🔓 Открыть розыгрыш",          callback_data="admin_open")],
     ]
     await update.message.reply_text(
-        f"🛠 Панель администратора\n\n"
-        f"📌 {title}\n"
-        f"🎁 {prize}\n"
-        f"👥 Участников: {total}\n"
-        f"🔄 Статус: {status}{winner_line}",
+        f"🛠 *Панель администратора*\n\n📌 {title}\n🎁 {prize}\n👥 Участников: {total}\n🔄 Статус: {status}{winner_line}",
+        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
@@ -221,15 +287,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not chunk:
             await query.edit_message_text("Участников пока нет.")
             return
-        lines = [f"👥 Участники (стр. {page+1} из {(len(parts)-1)//10+1})\n"]
+        lines = [f"👥 Участники (стр. {page+1})\n"]
         for i, p in enumerate(chunk, page*10+1):
             uname = f"@{p['username']}" if p["username"] else ""
             lines.append(f"{i}. {p['name']} {uname}")
         nav = []
-        if page > 0:
-            nav.append(InlineKeyboardButton("◀️", callback_data=f"admin_list_{page-1}"))
-        if (page+1)*10 < len(parts):
-            nav.append(InlineKeyboardButton("▶️", callback_data=f"admin_list_{page+1}"))
+        if page > 0: nav.append(InlineKeyboardButton("◀️", callback_data=f"admin_list_{page-1}"))
+        if (page+1)*10 < len(parts): nav.append(InlineKeyboardButton("▶️", callback_data=f"admin_list_{page+1}"))
         kb = [nav] if nav else []
         kb.append([InlineKeyboardButton("🔙 В меню", callback_data="admin_back")])
         await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
@@ -243,33 +307,30 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{p['name']}" + (f" @{p['username']}" if p["username"] else ""),
             callback_data=f"admin_win_{p['id']}"
         )] for p in parts]
-        kb.append([InlineKeyboardButton("🎲 Выбрать случайно", callback_data="admin_random")])
+        kb.append([InlineKeyboardButton("🎲 Случайно", callback_data="admin_random")])
         kb.append([InlineKeyboardButton("🔙 В меню", callback_data="admin_back")])
         await query.edit_message_text("Выберите победителя:", reply_markup=InlineKeyboardMarkup(kb))
 
-    elif action == "admin_random":
+    elif action in ("admin_random", ) or action.startswith("admin_win_"):
         parts = list(data["participants"].values())
-        if not parts:
-            await query.edit_message_text("Нет участников.")
-            return
-        winner = random.choice(parts)
+        if action == "admin_random":
+            if not parts:
+                await query.edit_message_text("Нет участников.")
+                return
+            winner = random.choice(parts)
+        else:
+            uid = str(action.split("_")[-1])
+            winner = data["participants"].get(uid)
+            if not winner:
+                await query.edit_message_text("Участник не найден.")
+                return
         data["winner"] = winner
         save_data(data)
         uname = f"@{winner['username']}" if winner["username"] else ""
         await query.edit_message_text(
-            f"🏆 Победитель выбран!\n\n{winner['name']} {uname}\n\nНажмите 'Объявить' в /admin"
+            f"🏆 Победитель выбран!\n\n{winner['name']} {uname}\n\nНажмите 📢 Объявить в /admin"
         )
-
-    elif action.startswith("admin_win_"):
-        uid = str(action.split("_")[-1])
-        winner = data["participants"].get(uid)
-        if winner:
-            data["winner"] = winner
-            save_data(data)
-            uname = f"@{winner['username']}" if winner["username"] else ""
-            await query.edit_message_text(
-                f"🏆 Победитель выбран!\n\n{winner['name']} {uname}\n\nНажмите 'Объявить' в /admin"
-            )
+        await update_channel_post(context, data)
 
     elif action == "admin_announce":
         if not data["winner"]:
@@ -281,8 +342,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             CHANNEL_ID,
             f"🎉 *{g.get('title', 'Розыгрыш')}* — Результаты!\n\n"
-            f"🏆 Победитель: {w['name']} {uname}\n\n"
-            f"🎁 Приз: {g.get('prize', '')}\n\nПоздравляем! 🎊",
+            f"🏆 Победитель: *{w['name']}* {uname}\n\n"
+            f"🎁 Приз: *{g.get('prize', '')}*\n\nПоздравляем! 🎊",
             parse_mode="Markdown"
         )
         await query.edit_message_text("✅ Объявление опубликовано в канале!")
@@ -290,11 +351,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "admin_close":
         data["active"] = False
         save_data(data)
+        await update_channel_post(context, data)
         await query.edit_message_text("🔒 Розыгрыш завершён.")
 
     elif action == "admin_open":
         data["active"] = True
         save_data(data)
+        await update_channel_post(context, data)
         await query.edit_message_text("🔓 Розыгрыш открыт!")
 
     elif action == "admin_back":
@@ -305,29 +368,26 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = "активен" if data["active"] else "завершён"
         winner_line = f"\n🏆 Победитель: {data['winner']['name']}" if data["winner"] else ""
         kb = [
-            [InlineKeyboardButton("👥 Список участников", callback_data="admin_list_0")],
-            [InlineKeyboardButton("🎲 Выбрать победителя", callback_data="admin_pick")],
-            [InlineKeyboardButton("📢 Объявить победителя в канале", callback_data="admin_announce")],
-            [InlineKeyboardButton("🔒 Завершить розыгрыш", callback_data="admin_close")],
-            [InlineKeyboardButton("🔓 Открыть розыгрыш", callback_data="admin_open")],
+            [InlineKeyboardButton("👥 Список участников",   callback_data="admin_list_0")],
+            [InlineKeyboardButton("🎲 Выбрать победителя",  callback_data="admin_pick")],
+            [InlineKeyboardButton("📢 Объявить победителя", callback_data="admin_announce")],
+            [InlineKeyboardButton("🔒 Завершить розыгрыш",  callback_data="admin_close")],
+            [InlineKeyboardButton("🔓 Открыть розыгрыш",    callback_data="admin_open")],
         ]
         await query.edit_message_text(
-            f"🛠 Панель администратора\n\n"
-            f"📌 {title}\n🎁 {prize}\n"
-            f"👥 Участников: {total}\n🔄 Статус: {status}{winner_line}",
+            f"🛠 *Панель администратора*\n\n📌 {title}\n🎁 {prize}\n👥 Участников: {total}\n🔄 Статус: {status}{winner_line}",
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(kb)
         )
 
 async def reset_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    save_data({"participants": {}, "winner": None, "active": False, "giveaway": None})
-    await update.message.reply_text("♻️ Розыгрыш сброшен. Используйте /create для нового.")
+    save_data({"participants": {}, "winner": None, "active": False, "giveaway": None, "channel_message_id": None})
+    await update.message.reply_text("♻️ Сброшено. Используйте /create для нового розыгрыша.")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-
-    # ConversationHandler для /create
     conv = ConversationHandler(
         entry_points=[CommandHandler("create", create_start)],
         states={
@@ -337,14 +397,13 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", create_cancel)],
     )
-
     app.add_handler(conv)
     app.add_handler(CommandHandler("start",  start))
     app.add_handler(CommandHandler("admin",  admin_panel))
     app.add_handler(CommandHandler("reset",  reset_giveaway))
-    app.add_handler(CallbackQueryHandler(join_callback,  pattern="^join$"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
-
+    app.add_handler(CallbackQueryHandler(join_callback,    pattern="^join$"))
+    app.add_handler(CallbackQueryHandler(already_callback, pattern="^already$"))
+    app.add_handler(CallbackQueryHandler(admin_callback,   pattern="^admin_"))
     logger.info("Bot started.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
