@@ -17,13 +17,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─── Config ───────────────────────────────────────────────────────────────────
 BOT_TOKEN      = os.environ.get("BOT_TOKEN", "")
 CHANNEL_ID     = os.environ.get("CHANNEL_ID", "")
 ADMIN_ID       = int(os.environ.get("ADMIN_ID", "0"))
-GIVEAWAY_TITLE = os.environ.get("GIVEAWAY_TITLE", "🎉 Розыгрыш!")
+GIVEAWAY_TITLE = os.environ.get("GIVEAWAY_TITLE", "Розыгрыш!")
 PRIZE_TEXT     = os.environ.get("PRIZE_TEXT", "Суперприз")
-
+DATA_FILE      = "participants.json"
 # ─── Persistent storage ───────────────────────────────────────────────────────
 def load_data() -> dict:
     if os.path.exists(DATA_FILE):
