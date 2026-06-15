@@ -18,12 +18,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── Config ───────────────────────────────────────────────────────────────────
-BOT_TOKEN      = os.environ["8620383916:AAFIvZF-0R7M7JhA7jNoFIKFttxNz0NKpa4"]
-CHANNEL_ID     = os.environ["CHANNEL_ID"]      # e.g. @mychannel or -100xxxxxxxxxx
-ADMIN_ID       = int(os.environ["7301568710"])   # your Telegram user ID
+BOT_TOKEN      = os.environ.get("BOT_TOKEN", "")
+CHANNEL_ID     = os.environ.get("CHANNEL_ID", "")
+ADMIN_ID       = int(os.environ.get("ADMIN_ID", "0"))
 GIVEAWAY_TITLE = os.environ.get("GIVEAWAY_TITLE", "🎉 Розыгрыш!")
-PRIZE_TEXT     = os.environ.get("PRIZE_TEXT",     "Суперприз")
-DATA_FILE      = "participants.json"
+PRIZE_TEXT     = os.environ.get("PRIZE_TEXT", "Суперприз")
 
 # ─── Persistent storage ───────────────────────────────────────────────────────
 def load_data() -> dict:
